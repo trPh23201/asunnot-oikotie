@@ -1,0 +1,12 @@
+{
+  "name": "asunnot-oikotie",
+  "version": "1.0.0",
+  "description": "Basic Playwright setup to open Chrome",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "playwright": "^1.43.0"
+  }
+}
