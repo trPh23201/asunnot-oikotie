@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 
 const TARGET_URL = 'https://asunnot.oikotie.fi/myytavat-asunnot';
-const PAGES_TO_SCRAPE = 4; // Page want to scrape, adjust as needed
+const PAGES_TO_SCRAPE = parseInt(process.argv[2]) || 2; // Usage: node index.js <pages>, defaults to 2
 
 // const acceptCookies = async (page) => {
 //   try {
