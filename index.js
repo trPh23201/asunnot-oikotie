@@ -1,5 +1,8 @@
 const { chromium } = require('playwright');
 const readline = require('readline');
+const xlsx = require('xlsx');
+const fs = require('fs');
+const path = require('path');
 
 const TARGET_URL = 'https://asunnot.oikotie.fi/myytavat-asunnot';
 const PAGES_TO_SCRAPE = 4; // Page want to scrape, adjust as needed
@@ -72,6 +75,17 @@ const waitForEnter = () => new Promise(resolve => {
   }
 
   console.log(`\nTotal items collected: ${allItems.length}`);
+
+  // Export to Excel with timestamp in public folder
+  const publicDir = path.join(__dirname, 'public');
+  if (!fs.existsSync(publicDir)) fs.mkdirSync(publicDir);
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const filename = path.join(publicDir, `housing_${timestamp}.xlsx`);
+  const worksheet = xlsx.utils.json_to_sheet(allItems.map((name, i) => ({ '#': i + 1, 'Name': name })));
+  const workbook = xlsx.utils.book_new();
+  xlsx.utils.book_append_sheet(workbook, worksheet, 'Housing');
+  xlsx.writeFile(workbook, filename);
+  console.log(`Exported to ${filename}`);
 
   await waitForEnter();
   await browser.close();
