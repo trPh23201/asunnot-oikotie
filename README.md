@@ -2,9 +2,9 @@
 
 A Playwright-based scraper that:
 
-1. Thu thập link từng căn từ [asunnot.oikotie.fi](https://asunnot.oikotie.fi/myytavat-asunnot)
-2. Vào từng trang chi tiết, lấy tên công ty (Taloyhtiön nimi), số điện thoại (bấm "Näytä numero" nếu có), và email (nếu có)
-3. Xuất kết quả ra Excel
+1. Collects all listing links from [asunnot.oikotie.fi](https://asunnot.oikotie.fi/myytavat-asunnot)
+2. For each detail page, extracts the company name (Taloyhtiön nimi), phone number (by clicking "Näytä numero" if present), and email (if available)
+3. Exports the results to Excel
 
 ## Requirements
 
