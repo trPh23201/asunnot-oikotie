@@ -1,92 +1,148 @@
 const { chromium } = require('playwright');
-const readline = require('readline');
 const xlsx = require('xlsx');
 const fs = require('fs');
 const path = require('path');
 
 const TARGET_URL = 'https://asunnot.oikotie.fi/myytavat-asunnot';
-const PAGES_TO_SCRAPE = parseInt(process.argv[2]) || 2; // Usage: node index.js <pages>, defaults to 2
+const PAGES_TO_SCRAPE = parseInt(process.argv[2]) || 2;
+const FORBIDDEN_EMAIL = ['info', 'contact', 'customer'];
+const clean = v => (v || '').replace(/\s+/g, ' ').trim();
 
-// const acceptCookies = async (page) => {
-//   try {
-//     await page.waitForSelector('button[title="Hyväksy kaikki"][aria-label="Hyväksy kaikki"]', { timeout: 7000 });
-//     await page.click('button[title="Hyväksy kaikki"][aria-label="Hyväksy kaikki"]');
-//     console.log('Accepted cookies automatically.');
-//   } catch {
-//     console.log('No cookie popup found or already accepted.');
-//   }
-// };
+// ── helpers ──────────────────────────────────────────────────────────────────
 
-const scrollDown = async (page) => {
+const acceptCookies = async (page) => {
+  try {
+    // The cookie banner button contains text "Hyväksy kaikki" inside a <span>
+    const btn = page.locator('button:has(span:text("Hyväksy kaikki")), button:has-text("Hyväksy kaikki")').first();
+    if (await btn.count()) await btn.click({ timeout: 4000 });
+  } catch { /* no banner */ }
+};
+
+const scrollToBottom = async (page) => {
   await page.evaluate(async () => {
     for (let i = 0; i < 10; i++) {
       window.scrollBy(0, window.innerHeight);
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise(r => setTimeout(r, 400));
     }
   });
 };
 
-const extractItems = async (page) => {
+const getListingUrls = async (page) => {
   await page.waitForSelector('main search-result-cards-v3', { timeout: 30000 });
   return page.$$eval(
-    'main search-result-cards-v3 .cards-v3__card.ng-star-inserted',
-    cards => cards.map(card => {
-      const el = card.querySelector('.card-v3-text-container__text');
-      return el ? el.textContent.trim() : null;
-    }).filter(Boolean)
+    'main search-result-cards-v3 .cards-v3__card.ng-star-inserted a[href*="/myytavat-asunnot/"]',
+    els => [...new Set(els.map(a => new URL(a.getAttribute('href'), location.origin).href))]
   );
 };
 
-const goToNextPage = async (page) => {
-  const nextBtn = await page.$('.pagination__control button:has-text("Seuraava")');
-  if (!nextBtn) return false;
-  await nextBtn.evaluate(el => el.click());
+const nextPage = async (page) => {
+  const btn = await page.$('.pagination__control button:has-text("Seuraava"), button[aria-label="Seuraava"]');
+  if (!btn) return false;
+  await btn.evaluate(el => el.click());
   await page.waitForLoadState('networkidle');
   return true;
 };
 
-const waitForEnter = () => new Promise(resolve => {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  rl.question('Press Enter to close the browser...', () => { rl.close(); resolve(); });
+// ── per-listing extractors ────────────────────────────────────────────────────
+
+const getCompanyName = (page) => page.evaluate(() => {
+  const clean = v => (v || '').replace(/\s+/g, ' ').trim();
+  const LABELS = ['taloyhtiön nimi', 'yhtiön nimi'];
+  // table rows
+  for (const row of document.querySelectorAll('tr')) {
+    const [th, td] = row.querySelectorAll('th,td');
+    if (th && td && LABELS.some(l => clean(th.textContent).toLowerCase().includes(l)))
+      return clean(td.textContent) || null;
+  }
+  // definition list
+  for (const dt of document.querySelectorAll('dt')) {
+    if (LABELS.some(l => clean(dt.textContent).toLowerCase().includes(l)))
+      return clean(dt.nextElementSibling?.textContent) || null;
+  }
+  return null;
 });
+
+const getPhone = async (page) => {
+  // Locate the button whose <span> says "Näytä numero"
+  const btn = page.locator('button:has(span:text-is("Näytä numero"))').first();
+  if (!await btn.count()) return '';
+  try {
+    await btn.scrollIntoViewIfNeeded();
+    await btn.click();
+    // Wait until <reveal-phone-number> has real content
+    await page.waitForFunction(
+      () => { const el = document.querySelector('reveal-phone-number'); return el && el.innerText.trim().length > 2; },
+      { timeout: 10000 }
+    );
+    const raw = clean(await page.locator('reveal-phone-number').first().innerText());
+    return raw.replace(/[^\d+ \-()]/g, '').trim();
+  } catch {
+    // Last-ditch: grab any tel: link that appeared after click
+    const tel = await page.$eval('a[href^="tel:"]', a => a.href.replace('tel:', '')).catch(() => '');
+    return tel;
+  }
+};
+
+const getEmailFallback = (page) => page.evaluate((forbidden) => {
+  const hits = document.body.innerText.match(/[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/gi) || [];
+  return hits.find(e => !forbidden.some(w => e.toLowerCase().includes(w))) || '';
+}, FORBIDDEN_EMAIL);
+
+// ── main ──────────────────────────────────────────────────────────────────────
 
 (async () => {
   const browser = await chromium.launch({ headless: false });
-  const page = await browser.newPage();
+  const ctx = await browser.newContext();
+  const listPage = await ctx.newPage();
 
-  await page.goto(TARGET_URL, { waitUntil: 'networkidle' });
-//   await acceptCookies(page);
+  await listPage.goto(TARGET_URL, { waitUntil: 'networkidle' });
+  await acceptCookies(listPage);
 
-  const allItems = [];
+  // Collect listing URLs across pages
+  const seen = new Set();
+  const urls = [];
+  for (let p = 1; p <= PAGES_TO_SCRAPE; p++) {
+    await scrollToBottom(listPage);
+    for (const u of await getListingUrls(listPage)) {
+      if (!seen.has(u)) { seen.add(u); urls.push(u); }
+    }
+    console.log(`Page ${p}: ${urls.length} links total`);
+    if (p < PAGES_TO_SCRAPE && !await nextPage(listPage)) break;
+  }
 
-  for (let currentPage = 1; currentPage <= PAGES_TO_SCRAPE; currentPage++) {
-    await scrollDown(page);
-    const items = await extractItems(page);
-    console.log(`Page ${currentPage} items:`, items);
-    allItems.push(...items);
+  // Scrape each listing
+  const rows = [];
+  for (let i = 0; i < urls.length; i++) {
+    const url = urls[i];
+    const dp = await ctx.newPage();
+    try {
+      await dp.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await acceptCookies(dp);
+      await dp.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
 
-    if (currentPage < PAGES_TO_SCRAPE) {
-      const hasNext = await goToNextPage(page);
-      if (!hasNext) {
-        console.log('No more pages available.');
-        break;
-      }
+      const company = clean(await getCompanyName(dp));
+      if (!company) { console.log(`[${i+1}/${urls.length}] skip (no company): ${url}`); continue; }
+
+      const phone = await getPhone(dp);
+      const email = phone ? '' : await getEmailFallback(dp);
+
+      rows.push({ '#': i + 1, CompanyName: company, Phone: phone, Email: email, URL: url });
+      console.log(`[${i+1}/${urls.length}] ${company} | ${phone || '-'} | ${email || '-'}`);
+    } catch (e) {
+      console.log(`[${i+1}/${urls.length}] error: ${e.message}`);
+    } finally {
+      await dp.close();
     }
   }
 
-  console.log(`\nTotal items collected: ${allItems.length}`);
+  // Export
+  const outDir = path.join(__dirname, 'public');
+  if (!fs.existsSync(outDir)) fs.mkdirSync(outDir);
+  const file = path.join(outDir, `housing_${new Date().toISOString().replace(/[:.]/g, '-')}.xlsx`);
+  const wb = xlsx.utils.book_new();
+  xlsx.utils.book_append_sheet(wb, xlsx.utils.json_to_sheet(rows), 'Housing');
+  xlsx.writeFile(wb, file);
+  console.log(`\nSaved ${rows.length} records → ${file}`);
 
-  // Export to Excel with timestamp in public folder
-  const publicDir = path.join(__dirname, 'public');
-  if (!fs.existsSync(publicDir)) fs.mkdirSync(publicDir);
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const filename = path.join(publicDir, `housing_${timestamp}.xlsx`);
-  const worksheet = xlsx.utils.json_to_sheet(allItems.map((name, i) => ({ '#': i + 1, 'Name': name })));
-  const workbook = xlsx.utils.book_new();
-  xlsx.utils.book_append_sheet(workbook, worksheet, 'Housing');
-  xlsx.writeFile(workbook, filename);
-  console.log(`Exported to ${filename}`);
-
-  await waitForEnter();
   await browser.close();
 })();
