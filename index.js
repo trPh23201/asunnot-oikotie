@@ -5,7 +5,7 @@ const path = require('path');
 
 const TARGET_URL = 'https://asunnot.oikotie.fi/myytavat-asunnot';
 const PAGES_TO_SCRAPE = parseInt(process.argv[2]) || 2;
-const FORBIDDEN_EMAIL = ['info', 'contact', 'customer'];
+const POOL_SIZE = 6; // Number of detail pages to open in parallel
 const clean = v => (v || '').replace(/\s+/g, ' ').trim();
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -82,10 +82,10 @@ const getPhone = async (page) => {
   }
 };
 
-const getEmailFallback = (page) => page.evaluate((forbidden) => {
+const getEmail = (page) => page.evaluate(() => {
   const hits = document.body.innerText.match(/[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/gi) || [];
-  return hits.find(e => !forbidden.some(w => e.toLowerCase().includes(w))) || '';
-}, FORBIDDEN_EMAIL);
+  return hits[0] || '';
+});
 
 // ── main ──────────────────────────────────────────────────────────────────────
 
@@ -95,7 +95,7 @@ const getEmailFallback = (page) => page.evaluate((forbidden) => {
   const listPage = await ctx.newPage();
 
   await listPage.goto(TARGET_URL, { waitUntil: 'networkidle' });
-  await acceptCookies(listPage);
+  // await acceptCookies(listPage);
 
   // Collect listing URLs across pages
   const seen = new Set();
@@ -109,29 +109,29 @@ const getEmailFallback = (page) => page.evaluate((forbidden) => {
     if (p < PAGES_TO_SCRAPE && !await nextPage(listPage)) break;
   }
 
-  // Scrape each listing
+  // Scrape each listing in parallel batches
   const rows = [];
-  for (let i = 0; i < urls.length; i++) {
-    const url = urls[i];
-    const dp = await ctx.newPage();
-    try {
-      await dp.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
-      await acceptCookies(dp);
-      await dp.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
-
-      let company = clean(await getCompanyName(dp));
-      if (!company) company = "None"
-
-      const phone = await getPhone(dp);
-      const email = await getEmailFallback(dp);
-
-      rows.push({ '#': i + 1, CompanyName: company, Phone: phone, Email: email, URL: url });
-      console.log(`[${i+1}/${urls.length}] ${company} | ${phone || '-'} | ${email || '-'}`);
-    } catch (e) {
-      console.log(`[${i+1}/${urls.length}] error: ${e.message}`);
-    } finally {
-      await dp.close();
-    }
+  for (let i = 0; i < urls.length; i += POOL_SIZE) {
+    const batch = urls.slice(i, i + POOL_SIZE);
+    const results = await Promise.all(batch.map(async (url, idx) => {
+      const dp = await ctx.newPage();
+      try {
+        await dp.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
+        await dp.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {});
+        let company = clean(await getCompanyName(dp));
+        if (!company) company = "None";
+        const phone = await getPhone(dp);
+        const email = await getEmail(dp);
+        console.log(`[${i + idx + 1}/${urls.length}] ${company} | ${phone || '-'} | ${email || '-'}`);
+        return { '#': i + idx + 1, CompanyName: company, Phone: phone, Email: email, URL: url };
+      } catch (e) {
+        console.log(`[${i + idx + 1}/${urls.length}] error: ${e.message}`);
+        return null;
+      } finally {
+        await dp.close();
+      }
+    }));
+    rows.push(...results.filter(Boolean));
   }
 
   // Export
