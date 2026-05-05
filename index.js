@@ -63,7 +63,6 @@ const getCompanyName = (page) => page.evaluate(() => {
 });
 
 const getPhone = async (page) => {
-  // Locate the button whose <span> says "Näytä numero"
   const btn = page.locator('button:has(span:text-is("Näytä numero"))').first();
   if (!await btn.count()) return '';
   try {
@@ -120,11 +119,11 @@ const getEmailFallback = (page) => page.evaluate((forbidden) => {
       await acceptCookies(dp);
       await dp.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
 
-      const company = clean(await getCompanyName(dp));
-      if (!company) { console.log(`[${i+1}/${urls.length}] skip (no company): ${url}`); continue; }
+      let company = clean(await getCompanyName(dp));
+      if (!company) company = "None"
 
       const phone = await getPhone(dp);
-      const email = phone ? '' : await getEmailFallback(dp);
+      const email = await getEmailFallback(dp);
 
       rows.push({ '#': i + 1, CompanyName: company, Phone: phone, Email: email, URL: url });
       console.log(`[${i+1}/${urls.length}] ${company} | ${phone || '-'} | ${email || '-'}`);
